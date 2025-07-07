@@ -1,13 +1,14 @@
 use crate::cfg_gen::dasm::*; 
 use itertools::Itertools; //里面有很多方便的集合操作，比如排序、分组等。
 use lazy_static::lazy_static; //可以让我们定义一些“全局变量”，只初始化一次，后面都能用。
-use petgraph::dot::Dot;
-use petgraph::prelude::*;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     hash::Hash,
 };
+use petgraph::prelude::GraphMap;
+use petgraph::Direction;
+use petgraph::Directed;
 
 use super::BLOCK_ENDERS_U8;
 
@@ -239,117 +240,174 @@ impl<'main> CFGRunner<'main> {
     }
 
     pub fn cfg_dot_str_with_blocks(&mut self) -> String {
-        /*
-        digraph {
-            node [shape=box, style=rounded, color="#565f89", fontcolor="#c0caf5", fontname="Helvetica"];
-            edge [color="#565f89", fontcolor="#c0caf5", fontname="Helvetica"];
-            bgcolor="#1a1b26";
-            0 [ label = "pc0: PUSH1 0x80"]
-            1 [ label = "pc2: JUMP" color = "red"]
-            ...
-        }
-        */
-
-        // have to use the petgraph module as the node indexes and edges are not the same as our weights
         let mut dot_str = Vec::new();
         let raw_start_str = r##"digraph G {
     node [shape=box, style="filled, rounded", color="#565f89", fontcolor="#c0caf5", fontname="Helvetica", fillcolor="#24283b"];
     edge [color="#414868", fontcolor="#c0caf5", fontname="Helvetica"];
-    bgcolor="#1a1b26";"##; 
-        dot_str.push(raw_start_str.to_string()); 
+    bgcolor="#1a1b26";"##;
+        dot_str.push(raw_start_str.to_string());
 
-        let nodes_and_edges_str = format!(
-            "{:?}",
-            Dot::with_attr_getters(
-                &self.cfg_dag,
-                &[
-                    petgraph::dot::Config::GraphContentOnly,
-                    petgraph::dot::Config::NodeNoLabel,
-                    petgraph::dot::Config::EdgeNoLabel
-                ],
-                &|_graph, edge_ref| {
-                    let (from, to, edge_type) = edge_ref;
-                    // 判断from和to节点是否都被高亮
-                    let highlight = if let Some(ref pcs) = self.executed_pcs {
-                        let from_block = self.map_to_instructionblock.get(&from).unwrap();
-                        let to_block = self.map_to_instructionblock.get(&to).unwrap();
-                        pcs.contains(&from_block.start_pc) && pcs.contains(&to_block.start_pc)
-                    } else {
-                        false
-                    };
+        // 输出所有节点，节点id用"startpc_endpc"
+        for ((start_pc, end_pc), block) in self.map_to_instructionblock.iter() {
+            let mut attrs = vec![];
+            let label = format!("{}", block);
+            attrs.push(format!("label = \"{}\"", label.replace("\"", "\\\"")));
+            // 高亮
+            if let Some(ref pcs) = self.executed_pcs {
+                if pcs.contains(start_pc) {
+                    attrs.push(format!(
+                        "fillcolor = \"{}\" fontcolor = \"#1a1b26\"",
+                        TOKYO_NIGHT_COLORS.get("green").unwrap()
+                    ));
+                }
+            }
+            // 入口节点特殊形状
+            if *start_pc == 0 {
+                attrs.push("shape = invhouse".to_string());
+            }
+            dot_str.push(format!(
+                "\"{}_{}\" [{}];",
+                start_pc, end_pc,
+                attrs.join(" ")
+            ));
+        }
+
+        // 输出所有边，节点id用"startpc_endpc"
+        for (from, to, edge_type) in self.cfg_dag.all_edges() {
+            let mut attrs = vec![];
+            // 高亮边：如果from和to的start_pc都在executed_pcs里，则高亮
+            let mut highlight = false;
+            if let Some(ref pcs) = self.executed_pcs {
+                if pcs.contains(&from.0) && pcs.contains(&to.0) {
+                    highlight = true;
+                }
+            }
+            match edge_type {
+                Edges::Jump => {
                     if highlight {
-                        // 高亮边（绿色）
-                        format!(
-                            "label = \"{:?}\" color = \"{}\" penwidth=3",
-                            edge_type,
+                        attrs.push(format!(
+                            "color = \"{}\" penwidth=3",
                             TOKYO_NIGHT_COLORS.get("green").unwrap()
-                        )
-                    } else {
-                        // 原有逻辑
-                        match edge_type {
-                            Edges::Jump => "".to_string(),
-                            Edges::ConditionTrue => format!(
-                                "label = \"{:?}\" color = \"{}\"",
-                                edge_type,
-                                TOKYO_NIGHT_COLORS.get("green").unwrap()
-                            ),
-                            Edges::ConditionFalse => format!(
-                                "label = \"{:?}\" color = \"{}\"",
-                                edge_type,
-                                TOKYO_NIGHT_COLORS.get("red").unwrap()
-                            ),
-                            Edges::SymbolicJump => format!(
-                                "label = \"{:?}\" color = \"{}\", style=\"dotted, bold\"",
-                                edge_type,
-                                TOKYO_NIGHT_COLORS.get("yellow").unwrap()
-                            ),
-                        }
-                    }
-                },
-                &|_graph, (_id, node_ref)| {
-                    let mut node_str = String::new();
-                    let instruction_block = self.map_to_instructionblock.get(node_ref).unwrap();
-                    let color = instruction_block.node_color();
-                    match color {
-                        Some(color) => {
-                            node_str.push_str(&format!(
-                                "label = \"{instruction_block}\" color = \"{color}\""
-                            ));
-                        }
-                        None => {
-                            node_str.push_str(&format!("label = \"{instruction_block}\""));
-                        }
-                    }
-                    // if the node has no incoming edges, fill the node with deepred
-                    if instruction_block.start_pc == 0 {
-                        node_str.push_str(" shape = invhouse");
-                    } else if self.cfg_dag.neighbors_directed(*node_ref, Incoming).count() == 0 {
-                        node_str.push_str(&format!(
-                            " fillcolor = \"{}\"",
-                            TOKYO_NIGHT_COLORS.get("deepred").unwrap()
                         ));
                     }
-                    // 新增代码：如果节点被执行过，则加高亮色
-                    if let Some(ref pcs) = self.executed_pcs {
-                        if pcs.contains(&instruction_block.start_pc) {
-                            node_str.push_str(&format!(
-                                " fillcolor = \"{}\" fontcolor = \"#1a1b26\"",
-                                TOKYO_NIGHT_COLORS.get("green").unwrap()
-                            ));
-                        }
-                    }
-                    node_str
                 }
-            )
-        );
-        dot_str.push(nodes_and_edges_str);
-        let raw_end_str = r#"}"#;
-        dot_str.push(raw_end_str.to_string());
+                Edges::ConditionTrue => {
+                    if highlight {
+                        attrs.push(format!(
+                            "label = \"True\" color = \"{}\" penwidth=3",
+                            TOKYO_NIGHT_COLORS.get("green").unwrap()
+                        ));
+                    } else {
+                        attrs.push(format!(
+                            "label = \"True\" color = \"{}\"",
+                            TOKYO_NIGHT_COLORS.get("green").unwrap()
+                        ));
+                    }
+                }
+                Edges::ConditionFalse => {
+                    if highlight {
+                        attrs.push(format!(
+                            "label = \"False\" color = \"{}\" penwidth=3",
+                            TOKYO_NIGHT_COLORS.get("red").unwrap()
+                        ));
+                    } else {
+                        attrs.push(format!(
+                            "label = \"False\" color = \"{}\"",
+                            TOKYO_NIGHT_COLORS.get("red").unwrap()
+                        ));
+                    }
+                }
+                Edges::SymbolicJump => {
+                    if highlight {
+                        attrs.push(format!(
+                            "label = \"Symbolic\" color = \"{}\" style=\"dotted, bold\" penwidth=3",
+                            TOKYO_NIGHT_COLORS.get("yellow").unwrap()
+                        ));
+                    } else {
+                        attrs.push(format!(
+                            "label = \"Symbolic\" color = \"{}\" style=\"dotted, bold\"",
+                            TOKYO_NIGHT_COLORS.get("yellow").unwrap()
+                        ));
+                    }
+                }
+            }
+            dot_str.push(format!(
+                "\"{}_{}\" -> \"{}_{}\" [{}];",
+                from.0, from.1, to.0, to.1,
+                attrs.join(" ")
+            ));
+        }
+
+        dot_str.push("}".to_string());
         dot_str.join("\n")
     }
 
     pub fn set_executed_pcs(&mut self, pcs: HashSet<u16>) {
         self.executed_pcs = Some(pcs);
+    }
+
+    /// 只导出高亮节点和高亮边的 dot 字符串
+    pub fn cfg_dot_str_highlighted_only(&self) -> String {
+        let mut dot_str = Vec::new();
+        let raw_start_str = r##"digraph G {
+    node [shape=box, style="filled, rounded", color="#565f89", fontcolor="#1a1b26", fontname="Helvetica"];
+    edge [color="#9ece6a", fontcolor="#1a1b26", fontname="Helvetica", penwidth=3];
+    bgcolor="#1a1b26";"##;
+        dot_str.push(raw_start_str.to_string());
+
+        // 只输出高亮节点
+        if let Some(ref pcs) = self.executed_pcs {
+            for ((start_pc, end_pc), block) in self.map_to_instructionblock.iter() {
+                if pcs.contains(start_pc) {
+                    let label = format!("{}", block);
+                    // 颜色优先级：SSTORE > ADD/SUB > 其它
+                    let mut has_sstore = false;
+                    let mut has_add_or_sub = false;
+                    for (_pc, op, _push) in &block.ops {
+                        let opname = super::opcode(*op).name.to_ascii_lowercase();
+                        if opname == "sstore" {
+                            has_sstore = true;
+                            break;
+                        }
+                        if opname == "add" || opname == "sub" {
+                            has_add_or_sub = true;
+                        }
+                    }
+                    let fillcolor = if has_sstore {
+                        "#f7768e" // 红色
+                    } else if has_add_or_sub {
+                        "#ff9e64" // 橙色
+                    } else {
+                        "#9ece6a" // 绿色
+                    };
+                    let mut attrs = vec![
+                        format!("label = \"{}\"", label.replace("\"", "\\\"")),
+                        format!("fillcolor = \"{}\" fontcolor = \"#1a1b26\"", fillcolor)
+                    ];
+                    if *start_pc == 0 {
+                        attrs.push("shape = invhouse".to_string());
+                    }
+                    dot_str.push(format!(
+                        "\"{}_{}\" [{}];",
+                        start_pc, end_pc,
+                        attrs.join(" ")
+                    ));
+                }
+            }
+
+            // 只输出高亮边（from、to都高亮）
+            for (from, to, _edge_type) in self.cfg_dag.all_edges() {
+                if pcs.contains(&from.0) && pcs.contains(&to.0) {
+                    dot_str.push(format!(
+                        "\"{}_{}\" -> \"{}_{}\";",
+                        from.0, from.1, to.0, to.1
+                    ));
+                }
+            }
+        }
+
+        dot_str.push("}".to_string());
+        dot_str.join("\n")
     }
 
     // 在 dot 导出时，如果节点/边被执行过，则加高亮色

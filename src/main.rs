@@ -140,6 +140,8 @@ fn main() {
         }
     }
 
+    println!("executed_blocks: {:?}", executed_blocks);
+
     // 2. 创建 CFGRunner
     let mut cfg_runner = cfg_gen::cfg_graph::CFGRunner::new(
         bytecode_analysed.original_byte_slice().into(),
@@ -162,6 +164,7 @@ fn main() {
     cfg_runner.form_basic_connections();
     // trim instruction blocks from graph that have no incoming edges and do not lead the block with a jumpdest
     cfg_runner.remove_unreachable_instruction_blocks();
+
     if output_handler.show_timings {
         println!("disassembly took: {:?}", disassembly_time.elapsed());
     }
@@ -189,6 +192,7 @@ fn main() {
     // write out the cfg with found indirect edges
     if let Some(filename) = &args.output {
         let mut file = std::fs::File::create(filename).expect("bad fs open");
+        // 只用 cfg_dot_str_with_blocks
         file.write_all(cfg_runner.cfg_dot_str_with_blocks().as_bytes())
             .expect("bad file write");
         println!("Dot file saved to {}", &filename);
@@ -210,6 +214,12 @@ fn main() {
     } else {
         println!("{}", cfg_runner.cfg_dot_str_with_blocks());
     };
+
+    // 生成只包含高亮路径的 dot 文件
+    let mut file = std::fs::File::create("highlighted_only.dot").expect("bad fs open");
+    file.write_all(cfg_runner.cfg_dot_str_highlighted_only().as_bytes())
+        .expect("bad file write");
+    println!("Dot file saved to highlighted_only.dot");
 
     if args.open {
         if let Some(filename) = &args.output {
